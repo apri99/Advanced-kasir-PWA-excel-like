@@ -1,9 +1,20 @@
+<!--
+Project: Kasir-PWA-ExcelLike (Advanced - Payment dropdown & change calc)
+This document replaces the previous advanced version and adds:
+- Payment column with dropdown (Uang Pas / Uang Lebih) and paid amount input
+- Automatic calculation of change when payment is more than total and writing "Kembali: X" into Keterangan column
+- Keeps previous features: IndexedDB, XLSX/CSV import-export, backup ZIP, PWA service worker, receipt
+
+Save files: index.html, sw.js, manifest.json, icons. Paste index.html into Notepad++ as requested.
+-->
+
+--- index.html ---
 <!doctype html>
 <html lang="id">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Kasir ULTIMATE — Advanced</title>
+  <title>Kasir ULTIMATE — Advanced (Payment dropdown)</title>
   <link rel="manifest" href="manifest.json" />
   <meta name="theme-color" content="#0f172a" />
   <style>
@@ -29,6 +40,8 @@
     .status{color:var(--muted);font-size:13px}
     .bottom{display:flex;justify-content:space-between;align-items:center;margin-top:12px}
     input[type=file]{display:none}
+    .payment-cell{display:flex;gap:6px;align-items:center}
+    .payment-cell select, .payment-cell input{padding:4px;border-radius:6px;border:1px solid rgba(0,0,0,0.08)}
     .receipt{display:none}
     @media print{ body *{visibility:hidden} .receipt, .receipt *{visibility:visible} .receipt{position:fixed;left:0;top:0;width:100%} }
   </style>
@@ -40,7 +53,7 @@
         <div class="logo">KU</div>
         <div>
           <h1>Kasir ULTIMATE — Advanced</h1>
-          <div class="subtitle">PWA Excel-like, formula engine, IndexedDB, Export XLSX/CSV, Receipt</div>
+          <div class="subtitle">PWA Excel-like + Dropdown Pembayaran + Auto-kembalian</div>
         </div>
       </div>
       <div class="controls">
@@ -52,7 +65,7 @@
     </header>
 
     <div class="toolbar">
-      <input id="searchInput" class="search" placeholder="Cari (nama barang / keterangan)..." />
+      <input id="searchInput" class="search" placeholder="Cari (nama barang / keterangan) ..." />
       <button id="backupBtn" class="small">Backup ZIP</button>
       <div style="flex:1"></div>
       <label for="importFile" class="small" style="cursor:pointer">Import</label>
@@ -99,9 +112,11 @@
   const defaultHeaders = ['Tanggal','Nama Barang','Qty','Harga Satuan','Diskon','Subtotal','Pajak(%)','Total','Pembayaran','Keterangan'];
   const DB_NAME='kasir-advanced'; const STORE='sheets'; const KEY='kasir-advanced-v1';
 
+  // payment types for dropdown
+  const PAYMENT_TYPES = ['Uang Pas','Uang Lebih'];
+
   let sheet = {headers: defaultHeaders.slice(), rows: []};
-  let db;
-  let hfInstance;
+  let db; let hfInstance;
 
   // DOM
   const headerRow = document.getElementById('headerRow');
@@ -138,36 +153,49 @@
     });
   }
 
-  // HyperFormula (light usage)
+  // HyperFormula init
   function initHyperFormula(){
-    try{
-      hfInstance = HyperFormula.buildEmpty({licenseKey: 'gpl-v3'});
-    }catch(e){
-      console.warn('HyperFormula init failed',e);
-    }
+    try{ hfInstance = HyperFormula.buildEmpty({licenseKey: 'gpl-v3'}); }catch(e){ console.warn('HF init failed',e); }
   }
 
-  // UI builders
+  // UI
   function buildHeader(){
-    headerRow.innerHTML = '';
+    headerRow.innerHTML='';
     const thNo = document.createElement('th'); thNo.textContent = 'No'; headerRow.appendChild(thNo);
-    for(let i=0;i<sheet.headers.length;i++){
-      const th = document.createElement('th'); th.textContent = COLS[i]+' — '+sheet.headers[i]; headerRow.appendChild(th);
-    }
+    for(let i=0;i<sheet.headers.length;i++){ const th=document.createElement('th'); th.textContent = COLS[i] + ' — ' + sheet.headers[i]; headerRow.appendChild(th); }
   }
 
   function buildBody(){
-    bodyRows.innerHTML = '';
+    bodyRows.innerHTML='';
     const rowsToShow = Math.max(sheet.rows.length, 20);
     for(let r=0;r<rowsToShow;r++){
       const tr = document.createElement('tr');
       const tdNo = document.createElement('td'); tdNo.textContent = r+1; tr.appendChild(tdNo);
       for(let c=0;c<sheet.headers.length;c++){
-        const td = document.createElement('td'); td.contentEditable = true; td.dataset.r = r; td.dataset.c = c;
-        td.addEventListener('input', onCellInput);
-        td.addEventListener('keydown', onKeyNav);
-        td.textContent = (sheet.rows[r] && sheet.rows[r][c] !== undefined) ? sheet.rows[r][c] : '';
-        tr.appendChild(td);
+        // Payment column index is 8 (0-based)
+        if(c === 8){
+          const td = document.createElement('td'); td.dataset.r = r; td.dataset.c = c; td.className = 'payment-cell';
+          const sel = document.createElement('select');
+          PAYMENT_TYPES.forEach(t=>{ const op = document.createElement('option'); op.value=t; op.textContent=t; sel.appendChild(op); });
+          const amt = document.createElement('input'); amt.type='number'; amt.step='0.01'; amt.placeholder='Jumlah dibayar'; amt.style.width='120px';
+
+          // load existing value if any
+          const raw = (sheet.rows[r] && sheet.rows[r][c]) ? String(sheet.rows[r][c]) : '';
+          if(raw && raw.includes('|')){
+            const [t,a] = raw.split('|'); sel.value = t || PAYMENT_TYPES[0]; amt.value = a || '';
+          }
+
+          sel.addEventListener('change', ()=>{ onPaymentChange(r, sel.value, amt.value); });
+          amt.addEventListener('input', ()=>{ onPaymentChange(r, sel.value, amt.value); });
+
+          td.appendChild(sel); td.appendChild(amt); tr.appendChild(td);
+        } else {
+          const td = document.createElement('td'); td.contentEditable = true; td.dataset.r = r; td.dataset.c = c;
+          td.addEventListener('input', onCellInput);
+          td.addEventListener('keydown', onKeyNav);
+          td.textContent = (sheet.rows[r] && sheet.rows[r][c] !== undefined) ? sheet.rows[r][c] : '';
+          tr.appendChild(td);
+        }
       }
       bodyRows.appendChild(tr);
     }
@@ -175,7 +203,7 @@
   }
 
   function buildFooter(){
-    footerRow.innerHTML = '';
+    footerRow.innerHTML='';
     const tdLabel = document.createElement('td'); tdLabel.textContent = 'Totals:'; footerRow.appendChild(tdLabel);
     for(let i=0;i<sheet.headers.length;i++){
       const td = document.createElement('td');
@@ -199,118 +227,142 @@
     buildFooter();
   }
 
-  function onKeyNav(e){
-    const td = e.target; const r = parseInt(td.dataset.r); const c = parseInt(td.dataset.c);
+  function onKeyNav(e){ const td = e.target; const r = parseInt(td.dataset.r); const c = parseInt(td.dataset.c);
     if(e.key === 'Enter'){ e.preventDefault(); const nr = Math.min(bodyRows.children.length-1, r+1); bodyRows.children[nr].children[c+1].focus(); }
     if(e.key === 'Tab'){ e.preventDefault(); const nc = (c+1)%sheet.headers.length; const nr = nc===0 ? Math.min(bodyRows.children.length-1, r+1) : r; bodyRows.children[nr].children[nc+1].focus(); }
   }
 
-  // Basic auto-calc (Subtotal, Total) — robust numeric handling
+  // Payment change handler
+  function onPaymentChange(r, type, amount){
+    sheet.rows[r] = sheet.rows[r] || Array(sheet.headers.length).fill('');
+    // store as "type|amount" string for easy export
+    sheet.rows[r][8] = `${type}|${amount}`;
+    // compute change logic
+    const total = parseFloat((sheet.rows[r][7])||0);
+    const paid = parseFloat(amount) || 0;
+    if(type === 'Uang Lebih'){
+      if(paid > total){
+        const change = paid - total;
+        sheet.rows[r][9] = `Kembali: ${change.toFixed(2)}`;
+      } else if(paid === total){
+        sheet.rows[r][9] = 'Uang Pas';
+      } else {
+        sheet.rows[r][9] = `Kurang: ${(total - paid).toFixed(2)}`;
+      }
+    } else { // Uang Pas
+      if(paid === total){ sheet.rows[r][9] = 'Uang Pas'; }
+      else if(paid > total){ sheet.rows[r][9] = `Kembali: ${(paid-total).toFixed(2)}`; }
+      else if(paid === 0){ sheet.rows[r][9] = ''; }
+      else { sheet.rows[r][9] = `Kurang: ${(total - paid).toFixed(2)}`; }
+    }
+    // update DOM for keterangan column if present
+    const tr = bodyRows.children[r]; if(tr){ const kIdx = 9; // keterangan column index (0-based in headers)
+      // +1 offset for 'No' cell
+      const cell = tr.children[kIdx+1]; if(cell) cell.textContent = sheet.rows[r][9]; }
+    if(document.getElementById('autoSave').checked && db) saveToDB();
+    buildFooter();
+  }
+
+  // Basic auto-calculation for subtotal & total
   function tryAutoCalc(r){
     const row = sheet.rows[r]; if(!row) return;
     const qty = parseFloat(row[2])||0; const price = parseFloat(row[3])||0; const disk = parseFloat(row[4])||0; const tax = parseFloat(row[6])||0;
-    const subtotal = qty*price - disk;
+    const subtotal = qty * price - disk;
     const total = subtotal + (subtotal * tax / 100);
     row[5] = subtotal.toFixed(2);
     row[7] = total.toFixed(2);
-    // update DOM cells
-    const tr = bodyRows.children[r];
-    if(tr){
-      // cell indexes: +1 because first column is 'No'
-      tr.children[6].textContent = row[5];
-      tr.children[8].textContent = row[7];
+    // update DOM
+    const tr = bodyRows.children[r]; if(tr){ tr.children[6].textContent = row[5]; tr.children[8].textContent = row[7]; }
+    // if payment cell had a value, re-evaluate payment->keterangan
+    if(row[8]){
+      const [type, amt] = String(row[8]).split('|'); onPaymentChange(r, type || PAYMENT_TYPES[0], amt || '');
     }
   }
 
-  // Export XLSX
+  // Export XLSX (serialize payment stored as string)
   document.getElementById('exportXLSX').addEventListener('click', ()=>{
     const ws_data = [sheet.headers].concat(sheet.rows.map(r=>r.map(c=>c)));
     const wb = XLSX.utils.book_new(); const ws = XLSX.utils.aoa_to_sheet(ws_data); XLSX.utils.book_append_sheet(wb, ws, 'Sheet1'); XLSX.writeFile(wb,'kasir-advanced.xlsx');
   });
 
-  // Import CSV/XLSX
+  // Import file
   document.getElementById('importFile').addEventListener('change', async (e)=>{
-    const f = e.target.files[0]; if(!f) return; const name = f.name.toLowerCase();
+    const f = e.target.files[0]; if(!f) return; const name=f.name.toLowerCase();
     if(name.endsWith('.csv')){
-      const txt = await f.text();
-      const rows = txt.split(/\r?\n/).filter(Boolean).map(r => r.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(c=>c.replace(/^"|"$/g,'')));
-      sheet.headers = rows.shift().map(h=>h||'');
-      sheet.rows = rows.map(r=>r);
+      const txt = await f.text(); const rows = txt.split(/
+?
+/).filter(Boolean).map(r=>r.replace(/^"|"$/g,'').split(',').map(c=>c.replace(/""/g,'"')));
+      sheet.headers = rows.shift().map(h=>h||''); sheet.rows = rows.map(r=>r);
       refreshAll(); if(db) saveToDB();
     } else {
-      const data = await f.arrayBuffer();
-      const wb = XLSX.read(data,{type:'array'});
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const aoa = XLSX.utils.sheet_to_json(ws,{header:1});
-      sheet.headers = aoa.shift().map(h=>h||'');
-      sheet.rows = aoa.map(r=>r);
+      const data = await f.arrayBuffer(); const wb = XLSX.read(data,{type:'array'}); const ws = wb.Sheets[wb.SheetNames[0]]; const aoa = XLSX.utils.sheet_to_json(ws,{header:1}); sheet.headers = aoa.shift().map(h=>h||''); sheet.rows = aoa.map(r=>r);
       refreshAll(); if(db) saveToDB();
     }
   });
 
-  // Backup zip
+  // Backup ZIP
   document.getElementById('backupBtn').addEventListener('click', async ()=>{
-    const zip = new JSZip();
-    zip.file('sheet.json', JSON.stringify(sheet));
-    zip.file('sheet.csv', toCSV());
-    const content = await zip.generateAsync({type:'blob'});
-    const url = URL.createObjectURL(content);
-    const a = document.createElement('a'); a.href = url; a.download = 'kasir-backup.zip'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    const zip = new JSZip(); zip.file('sheet.json', JSON.stringify(sheet)); zip.file('sheet.csv', toCSV());
+    const content = await zip.generateAsync({type:'blob'}); const url = URL.createObjectURL(content); const a=document.createElement('a'); a.href=url; a.download='kasir-backup.zip'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   });
 
-  function toCSV(){
-    const arr = [sheet.headers].concat(sheet.rows.map(r=>r.map(c=>c)));
-    return arr.map(row => row.map(cell=>`"${(cell||'')}"`).join(',')).join('\n');
-  }
+  function toCSV(){ const arr=[sheet.headers].concat(sheet.rows.map(r=>r.map(c=>c))); return arr.map(row=>row.map(cell=>`"${(cell||'')}"`).join(',')).join('
+'); }
 
   // Search
   document.getElementById('searchInput').addEventListener('input', (e)=>{
-    const q = e.target.value.toLowerCase();
-    for(let r=0;r<bodyRows.children.length;r++){
-      const tr = bodyRows.children[r];
-      const text = Array.from(tr.children).slice(1).map(td=>td.textContent.toLowerCase()).join(' ');
-      tr.style.display = text.includes(q) ? '' : 'none';
-    }
+    const q = e.target.value.toLowerCase(); for(let r=0;r<bodyRows.children.length;r++){ const tr = bodyRows.children[r]; const text = Array.from(tr.children).slice(1).map(td=>td.textContent.toLowerCase()).join(' '); tr.style.display = text.includes(q) ? '' : 'none'; }
   });
 
   // Receipt print
-  function printReceipt(rowIndex){
-    const row = sheet.rows[rowIndex]; if(!row) return;
-    receiptBody.innerHTML = `<div>Tanggal: ${row[0]||''}</div><div>Item: ${row[1]||''}</div><div>Qty: ${row[2]||''} x ${row[3]||''}</div><div>Subtotal: ${row[5]||''}</div><div>Total: ${row[7]||''}</div>`;
-    receipt.style.display = 'block'; window.print();
-    setTimeout(()=>{ receipt.style.display = 'none'; }, 1000);
-  }
+  function printReceipt(rowIndex){ const row = sheet.rows[rowIndex]; if(!row) return; receiptBody.innerHTML = `<div>Tanggal: ${row[0]||''}</div><div>Item: ${row[1]||''}</div><div>Qty: ${row[2]||''} x ${row[3]||''}</div><div>Subtotal: ${row[5]||''}</div><div>Total: ${row[7]||''}</div><div>${row[9]||''}</div>`; receipt.style.display='block'; window.print(); setTimeout(()=>{ receipt.style.display='none'; },1000); }
 
-  // New/Open/Save buttons
-  document.getElementById('newDoc').addEventListener('click', ()=>{
-    sheet = {headers: defaultHeaders.slice(), rows: Array(20).fill(0).map(()=>Array(defaultHeaders.length).fill(''))};
-    refreshAll(); if(db) saveToDB();
-  });
-
-  document.getElementById('openDoc').addEventListener('click', async ()=>{
-    try{ await loadFromDB(); refreshAll(); }catch(e){ alert('Tidak ada data tersimpan.'); }
-  });
-
+  // New/Open/Save
+  document.getElementById('newDoc').addEventListener('click', ()=>{ sheet = {headers: defaultHeaders.slice(), rows: Array(20).fill(0).map(()=>Array(defaultHeaders.length).fill(''))}; refreshAll(); if(db) saveToDB(); });
+  document.getElementById('openDoc').addEventListener('click', async ()=>{ try{ await loadFromDB(); refreshAll(); }catch(e){ alert('Tidak ada data tersimpan.'); } });
   document.getElementById('saveLocal').addEventListener('click', ()=>{ if(db) saveToDB(); else alert('DB belum terbuka'); });
 
   // Initialize
   (async ()=>{
-    try{
-      await openDB();
-      initHyperFormula();
-      try{ await loadFromDB(); }catch(e){ sheet = {headers: defaultHeaders.slice(), rows: Array(20).fill(0).map(()=>Array(defaultHeaders.length).fill(''))}; }
+    try{ await openDB(); initHyperFormula(); try{ await loadFromDB(); }catch(e){ sheet = {headers: defaultHeaders.slice(), rows: Array(20).fill(0).map(()=>Array(defaultHeaders.length).fill(''))}; }
       refreshAll();
-    }catch(e){
-      console.error('Init error', e);
-      sheet = {headers: defaultHeaders.slice(), rows: Array(20).fill(0).map(()=>Array(defaultHeaders.length).fill(''))};
-      refreshAll();
-    }
+    }catch(e){ console.error('Init error',e); sheet = {headers: defaultHeaders.slice(), rows: Array(20).fill(0).map(()=>Array(defaultHeaders.length).fill(''))}; refreshAll(); }
   })();
 
   // Service worker registration
-  if('serviceWorker' in navigator){
-    navigator.serviceWorker.register('sw.js').then(()=>console.log('SW registered')).catch(()=>{});
-  }
+  if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js').then(()=>console.log('SW registered')).catch(()=>{}); }
   </script>
 </body>
 </html>
+
+--- sw.js ---
+// sw.js (simple cache)
+const CACHE_NAME = 'kasir-adv-cache-v1';
+const FILES_TO_CACHE = ['.','index.html','manifest.json'];
+self.addEventListener('install', evt => { evt.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(FILES_TO_CACHE))); self.skipWaiting(); });
+self.addEventListener('activate', evt => { evt.waitUntil(self.clients.claim()); });
+self.addEventListener('fetch', evt => { evt.respondWith(caches.match(evt.request).then(r => r || fetch(evt.request))); });
+
+--- manifest.json ---
+{
+  "name": "Kasir ULTIMATE Advanced",
+  "short_name": "KasirAdv",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#071026",
+  "theme_color": "#0f172a",
+  "icons": [
+    {"src":"icon-192.png","sizes":"192x192","type":"image/png"},
+    {"src":"icon-512.png","sizes":"512x512","type":"image/png"}
+  ]
+}
+
+--- README.txt ---
+Perubahan: kolom Pembayaran sekarang berisi dropdown (Uang Pas / Uang Lebih) + input jumlah dibayar. Jika pembayaran lebih besar dari Total, kolom Keterangan akan otomatis berisi: "Kembali: <jumlah>". Jika kurang, akan menampilkan "Kurang: <jumlah>". Jika sama, menampilkan "Uang Pas".
+
+Langkah selanjutnya jika kamu mau:
+- Saya bisa ubah ekspor CSV/XLSX agar memisahkan kolom Pembayaran menjadi dua kolom (TipePembayaran, JumlahDibayar).
+- Tambah validasi input (format mata uang) dan tombol cepat "Bayar sekarang" pada tiap baris.
+- Buatkan script packaging TWA/APK.
+
+Silakan salin `index.html` ke Notepad++, tambahkan `sw.js` dan `manifest.json`, lalu push ke GitHub. Jika mau saya siapkan ZIP, pilih A dari opsi sebelumnya.
